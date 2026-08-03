@@ -8,8 +8,8 @@ The full math of LoRA, measured on real SLM weights — SVD to rank selection to
 | Unit | Topic | Core formula | Status |
 |------|-------|-------------|--------|
 | 1 | SVD & Eckart–Young on real weights | `W ≈ Uₖ·Sₖ·Vₖᵀ`, error ∝ tail energy | ✅ Complete |
-| 2 | The LoRA parametrization | `ΔW = (α/r)·B·A`, budget, merge trick | 🚧 CB 2.1–2.3 pending |
-| 3 | The LoRA hypothesis (real GD) | learned `ΔW` after gradient descent on one layer | pending |
+| 2 | The LoRA parametrization | `ΔW = (α/r)·B·A`, budget, merge trick | ✅ Complete |
+| 3 | The LoRA hypothesis (real GD) | learned `ΔW` after gradient descent on one layer | 🚧 scaffolded |
 | 4 | Rank selection | how to pick `r` with data | pending |
 | 5 | Scale-out: spectra 135M→1.7B | rank behavior across model size | pending |
 | 6 | Industrial deployment | merging, QLoRA, multi-adapter, CPU serving | pending |
@@ -25,7 +25,7 @@ rank-decomposition-lora/
 ├── venv/                         ← local environment
 ├── unit1_svd_eckart_young.ipynb  ← low rank measured & exactly quantified
 ├── unit2_lora_math.ipynb         ← parametrization, budget, merge trick
-├── unit3_lora_hypothesis.ipynb   ← (scaffold) real GD LoRA on one layer
+├── unit3_lora_hypothesis.ipynb  ← GD LoRA vs full FT: does the optimizer find low-rank?
 ├── unit4_rank_selection.ipynb    ← (scaffold)
 ├── unit5_scaleout_spectra.ipynb  ← (scaffold) 135M→1.7B, ~4GB downloads
 └── unit6_industrial_deployment.ipynb ← (scaffold)
@@ -61,6 +61,32 @@ One contrast for later: W_Q (k@90 = 65) would hit error 0.316 with far fewer dir
 
 ---
 
-## Unit 2 — The LoRA parametrization (in progress)
+## Unit 2 — The LoRA parametrization (complete)
 
-**Next step:** implement CB 2.1 (parameter budgets on real shapes), CB 2.2 (build `ΔW = (α/r)·B·A`, check rank ≤ r and perturbation size), CB 2.3 (merge trick exactness) — then fill the findings table.
+**Adapting is a budget question, measured exactly.** CB 2.1 computed adapter parameter counts on all five real shapes; CB 2.2 built `ΔW = (α/r)·B·A` and proved the rank bound numerically; CB 2.3 verified the merge trick to float noise.
+
+**Measured findings (SmolLM2-135M, not assumed):**
+
+| # | Claim | Predicted | Measured | Verdict |
+|---|---|---|---|---|
+| 1 | LoRA params are a small fraction of W | ~2% at r=8 | **0.48%–2.78%** by shape (W_Q 2.78%, FFN 1.91%, W_E 1.41%) | ✅ Holds |
+| 2 | `ΔW` is exactly rank ≤ r | ≤ 8 by construction | **8** nonzero singular values = r | ✅ Holds |
+| 3 | `ΔW` is a small perturbation of W | `‖ΔW‖/‖W‖` ~ 1e-2..1e-3 | **6.1e-3** | ✅ Holds (in band) |
+| 4 | Merged == unmerged | max err ~ 1e-6 | **2.19e-07** (float noise) | ✅ Holds |
+
+**The budget formula:** `fraction = r(d+k)/(dk) = r/d + r/k`. Three consequences the table shows:
+- **Linear in r** — r=8 → 1.91% but r=64 → 15.28% on W_gate; rank is a linear budget, not a curve. This is the concrete reason Unit 4 (rank selection) exists.
+- **Shape-dependent, not size-dependent** — W_E (49,152×576) costs only 1.41% because its fraction ≈ `r/k`; the *small* dimension sets the price.
+- **Symmetric in (d,k)** — W_down (576,1536) costs exactly what W_gate (1536,576) costs: 16,896 params.
+
+**The two serving strategies are the same math:** merged (`W_eff = W₀ + (α/r)BA`, one matmul, zero overhead — deployment default) vs unmerged (`W₀x + (α/r)·B(Ax)`, two small matmuls, base weight shared — multi-adapter routing). Verified identical to 2.19e-07.
+
+**Correction the measurement caught:** the scaffold predicted W_E at ~0.03% — that was wrong; the correct value is **~1.41%** (`r/k = 8/576`). The prediction-as-typo was fixed; the real measured row stands on its own.
+
+**Unit 2 in two lines:** LoRA is Unit 1's spectrum turned into a budget — a rank-8 `(α/r)·B·A` costs ~2% of the parameters, is confined to exactly 8 directions by construction, moves W by ~0.6%, and merges for zero inference overhead.
+
+**Next — Unit 3:** the hypothesis itself — train a real LoRA (r=8) on one layer with gradient descent and SVD the *learned* `ΔW`. Does the optimizer actually find a delta that uses its 8 directions well?
+
+---
+
+## Unit 3 — The LoRA hypothesis (scaffolded)
