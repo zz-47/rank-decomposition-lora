@@ -9,8 +9,8 @@ The full math of LoRA, measured on real SLM weights — SVD to rank selection to
 |------|-------|-------------|--------|
 | 1 | SVD & Eckart–Young on real weights | `W ≈ Uₖ·Sₖ·Vₖᵀ`, error ∝ tail energy | ✅ Complete |
 | 2 | The LoRA parametrization | `ΔW = (α/r)·B·A`, budget, merge trick | ✅ Complete |
-| 3 | The LoRA hypothesis (real GD) | learned `ΔW` after gradient descent on one layer | 🚧 scaffolded |
-| 4 | Rank selection | how to pick `r` with data | pending |
+| 3 | The LoRA hypothesis (real GD) | learned `ΔW` after gradient descent on one layer | 🚧 CB 3.2 re-run pending |
+| 4 | Rank selection | how to pick `r` with data | 🚧 scaffolded |
 | 5 | Scale-out: spectra 135M→1.7B | rank behavior across model size | pending |
 | 6 | Industrial deployment | merging, QLoRA, multi-adapter, CPU serving | pending |
 
@@ -26,7 +26,7 @@ rank-decomposition-lora/
 ├── unit1_svd_eckart_young.ipynb  ← low rank measured & exactly quantified
 ├── unit2_lora_math.ipynb         ← parametrization, budget, merge trick
 ├── unit3_lora_hypothesis.ipynb  ← GD LoRA vs full FT: does the optimizer find low-rank?
-├── unit4_rank_selection.ipynb    ← (scaffold)
+├── unit4_rank_selection.ipynb   ← (scaffold) the r-sweep: loss-elbow on synthetic + real deltas
 ├── unit5_scaleout_spectra.ipynb  ← (scaffold) 135M→1.7B, ~4GB downloads
 └── unit6_industrial_deployment.ipynb ← (scaffold)
 ```
@@ -89,4 +89,25 @@ One contrast for later: W_Q (k@90 = 65) would hit error 0.316 with far fewer dir
 
 ---
 
-## Unit 3 — The LoRA hypothesis (scaffolded)
+## Unit 3 — The LoRA hypothesis: does GD find a low-rank delta? (in progress)
+
+**Design.** A *controlled* task: inject a known rank-4 delta `E` (`‖E‖/‖W‖ = 0.1`) into `W_gate`, train to recover it from 576 real token embeddings (`X = W_E[:576]`, measured `rank(X) = 565`). Then train full fine-tuning on the identical task. The controlled target makes any residual an *optimization* story, not a *representation* one.
+
+**Measured findings (SmolLM2-135M, GD on real tokens — not assumed):**
+
+| # | Claim | Predicted | Measured | Verdict |
+|---|---|---|---|---|
+| 1 | r=8 LoRA learns the rank-4 delta | rel. loss ~1e-4 or below | **0.0086 → ~5e-6** (3 orders) | ✅ Holds |
+| 2 | Learned `ΔW` is concentrated | ~4 strong svals, ~4 tail | ⏳ pending clean re-run | — |
+| 3 | Learned subspace aligns with target | overlap ~1.0 | ⏳ pending clean re-run | — |
+| 4 | Full FT: more params, no new capability | loss ≥ LoRA, 52.36× params | **slower + ~25% worse floor** (1.1e-5 vs ~5e-6) | ✅ Holds — *prediction corrected* |
+
+**The prediction correction (row 4).** Full fine-tuning was expected to drop at least as far (no representation limit). Measured: at the same 300-step/Adam budget it converged ~2× slower and plateaued ~25% higher, with **52.36× the parameters**. The `r=8` constraint is an inductive bias that already matches the task's true shape; full FT must rediscover low rank inside 884,736 dims, and its extra capacity adds noise, not signal, at equal budget. Honest caveat: both floors are optimizer-limited (Adam lr 1e-2, no decay); the claim is about the budget regime, not the asymptotic limit.
+
+**Process finding — the one-character bug.** A typo `dW = scale = (B @ A)` re-assigned the scalar `scale` (α/r = 2) to a matrix, making the extracted `dW_learned` an elementwise square of rank-8 — producing `matrix_rank = 13`, a smeared spectrum, overlap ~0.1, and a grad-graph plot error, all while the in-loop training stayed valid. The rank gate in CB 3.2 is exactly what caught it. Lesson recorded: the measuring instrument needs gates too.
+
+**Rows 2–3** await the clean re-run of CB 3.1 + 3.2 (fix already applied in the notebook): expected `matrix_rank ≤ 8`, `strong ≈ 4`, `overlap → [~1.0 ×4]`.
+
+---
+
+## Unit 4 — Choosing the Rank: when does adding r stop buying? (scaffolded)
