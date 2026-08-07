@@ -10,7 +10,7 @@ The full math of LoRA, measured on real SLM weights — SVD to rank selection to
 | 1 | SVD & Eckart–Young on real weights | `W ≈ Uₖ·Sₖ·Vₖᵀ`, error ∝ tail energy | ✅ Complete |
 | 2 | The LoRA parametrization | `ΔW = (α/r)·B·A`, budget, merge trick | ✅ Complete |
 | 3 | The LoRA hypothesis (real GD) | learned `ΔW` after gradient descent on one layer | 🚧 CB 3.2 re-run pending |
-| 4 | Rank selection | how to pick `r` with data | 🚧 scaffolded |
+| 4 | Rank selection | how to pick `r` with data | ✅ Complete (Exp A–C) |
 | 5 | Scale-out: spectra 135M→1.7B | rank behavior across model size | pending |
 | 6 | Industrial deployment | merging, QLoRA, multi-adapter, CPU serving | pending |
 
@@ -22,11 +22,11 @@ The full math of LoRA, measured on real SLM weights — SVD to rank selection to
 rank-decomposition-lora/
 ├── README.md                     ← this file
 ├── requirements.txt              ← pinned env (torch 2.13.0, transformers 5.14.1)
-├── venv/                         ← local environment
+├── .venv/                        ← local environment (hidden, gitignored)
 ├── unit1_svd_eckart_young.ipynb  ← low rank measured & exactly quantified
 ├── unit2_lora_math.ipynb         ← parametrization, budget, merge trick
-├── unit3_lora_hypothesis.ipynb  ← GD LoRA vs full FT: does the optimizer find low-rank?
-├── unit4_rank_selection.ipynb   ← (scaffold) the r-sweep: loss-elbow on synthetic + real deltas
+├── unit3_lora_hypothesis.ipynb   ← GD LoRA vs full FT: does the optimizer find low-rank?
+├── unit4_rank_selection.ipynb   ← r-sweep measured: loss-elbow on controlled + real deltas
 ├── unit5_scaleout_spectra.ipynb  ← (scaffold) 135M→1.7B, ~4GB downloads
 └── unit6_industrial_deployment.ipynb ← (scaffold)
 ```
@@ -110,4 +110,49 @@ One contrast for later: W_Q (k@90 = 65) would hit error 0.316 with far fewer dir
 
 ---
 
-## Unit 4 — Choosing the Rank: when does adding r stop buying? (scaffolded)
+## Unit 4 — Choosing the Rank: when does adding r stop buying? (complete)
+
+**Design.** Sweep rank `r` across two deltas: a controlled rank-4 delta on `W_gate` (ground truth known) and a *real* cross-layer delta `W_Q1 − W_Q0`. Read the **loss-elbow** (smallest `r` where the next rank buys < 2×) and cross-check it against the delta's spectral effective rank (`k90`). All on 576 real token embeddings (`rank(X) = 565`, quantified caveat).
+
+**Measured findings (SmolLM2-135M, not assumed):**
+
+| # | Claim | Predicted | Measured | Verdict |
+|---|---|---|---|---|
+| 1 | Controlled sweep: elbow at true rank | r = 4 | **elbow = 4**, floor 3.0e-3 → 2.9e-6 | ✅ Holds |
+| 2 | r=2 under-fits by orders | floor ~1e-2..1e-3 | **3.2e-3 vs 2.9e-6** (3 orders) | ✅ Holds |
+| 3 | Real Q-delta elbow is small | below r=8 default | **k90 = 200/576**; floors ~1.0, no sound elbow | ❌ Reversed |
+| 4 | Loss-elbow agrees with k90 | agreement | **only within-representable**: A 4=4 ✓; B mirage (elbow 2) | ⚠️ Conditional |
+
+**Row 3 reversed the prediction.** The controlled task proves the method: elbow = 4 = the true known rank, and the r=2→4 transition is a 3-order drop. But the *real* cross-layer delta `W_Q1 − W_Q0` is **~200-dimensional (≈35% of 576) — not low-rank by construction**. LoRA's max r=16 (rank ≤ 16) cannot represent it, so no floor exists and the elbow degenerates to a false 2.
+
+**Why it matters:** a *fine-tuning* delta (what LoRA is for) is a small perturbation of one weight; `W_Q1 − W_Q0` is the difference between two separately-trained layers — structurally dissimilar, not a nudge. The measurement caught it before any real sweep could save the premise.
+
+**The gatekeeper rule (the takeaway).** The spectrum gates the method: if effective `k90 ≤` sweep-range the loss-elbow finds it exactly; if `k90 ≫` range the delta isn't LoRA-adaptable — read the spectrum *first*, sweep *only when it fits*. The loss floor alone cannot certify an elbow (Experiment C's two panels make the difference unmistakable).
+
+**Status:** Experiments A (elbow 4 = true rank), B (k90 = 200, not low-rank), C (two-panel elbow plot; both regimes) measured.
+
+**The mechanism in three sentences**
+
+The loss-vs-rank curve is really the delta's spectrum in disguise. The best rank-r approximation error of a delta equals the tail of its squared singular values from σ_{r+1} on: loss(r) = Σ_{i>r} σᵢ². So "sweeping r" is just walking along the spectrum's cumulative tail.
+
+Controlled A has a spectral cliff: its delta is exactly rank 4, so σ₅…σ₅₇₆ = 0. The tail is 0 for any r ≥ 4, and huge for r < 4. Under r<4 you're boxed below the capacity that could touch the signal → floor pinned at 3e-3. The instant r=4 grants the capacity, the fit becomes exact → loss collapses to the optimizer floor (2.9e-6) and then goes flat (r=8,16 add nothing). The elbow is that cliff in representational capacity.
+
+Real (B) has a long spectral tail, no cliff. Its delta is ~rank-200 (k90=200). For every r in {2…16}, r ≪ 200, so you're always on the smooth monotone tail — each extra rank nets a bit more captured variance (~1.2×), but none ever crosses the point where the tail hits zero. No capacity cliff exists in the sweep, so no elbow — just a slow monotone slide. The flagged r=2 is a local derivative wobble, not a phase change.
+
+**The mechanism, precisely.**
+
+- **Under-parameterized (r < true rank):** the model cannot represent the delta — the loss floor is a capacity bound (the best rank-r approximation), and no amount of optimization fixes it.
+- **At/over-parameterized (r ≥ true rank):** exact fit is reachable — the floor becomes the optimizer's noise (~1e-6), not a capacity wall.
+- **The elbow** is the transition between those two regimes: the point where the capacity you give exactly meets the rank the data demands. That's why elbow = k90 when the sweep contains it — it's the same number seen two ways (Unit 1's spectrum, and this unit's training curve). And it's why the spectrum gate exists: you can read that cliff before paying for any sweep.
+
+---
+
+## Unit 5 — Spectra at Scale: does low rank survive 135M → 1.7B? (scaffolded)
+
+**Question.** Unit 1 measured the spectrum of one model. Does the rank structure *travel* as the model grows? Three SmolLM2 sizes (135M, 360M, 1.7B), the same five matrices, one SVD each, plotted against parameter count.
+
+**Hypothesis.** If the effective rank tracks the model's *width* (d = 576 → 960 → 2048), k90/n should stay roughly flat across sizes — concentration is a property of the architecture, not the scale. If it tracks something else, the ratio moves and the "concentration is intrinsic" story needs rewriting.
+
+**The measurement.** Load each model fresh, extract the five matrices, SVD each to the 90%-energy rank (`k90`) and top-1 energy share, then `del model` + `gc.collect()` before the next size. The download is the constraint: 360M (~720MB) and 1.7B (~3.4GB) will stream into the HF cache once; after that every run is local. CPU time is bounded by the 1.7B SVD (only the top of the spectrum is needed — `torch.linalg.svd(..., full_matrices=False)`).
+
+**Findings:** _pending measurement._ To be filled after the notebooks run.
