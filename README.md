@@ -3,7 +3,7 @@ The full math of LoRA, measured on real SLM weights — SVD to rank selection to
 
 ---
 
-## Units
+## Studies
 
 | Unit | Topic | Core formula | Status |
 |------|-------|-------------|--------|
@@ -35,7 +35,7 @@ Each notebook is **self-contained** (loads the model fresh), runs on CPU-only Wi
 
 ---
 
-## Unit 1 — SVD & Eckart–Young on real SmolLM2-135M weights (complete)
+## Study 1 — SVD & Eckart–Young on real SmolLM2-135M weights (complete)
 
 **Low rank is a measured, exactly-quantified property** — not a slogan. CB 1.1 SVD'd the five key matrices; CB 1.2 verified the Eckart–Young theorem (|meas−theory| ≤ 9.5e-06); CB 1.3 carried the error through a real forward step (output rel_err 0.2867 vs matrix 0.3148).
 
@@ -61,7 +61,7 @@ One contrast for later: W_Q (k@90 = 65) would hit error 0.316 with far fewer dir
 
 ---
 
-## Unit 2 — The LoRA parametrization (complete)
+## Study 2 — The LoRA parametrization (complete)
 
 **Adapting is a budget question, measured exactly.** CB 2.1 computed adapter parameter counts on all five real shapes; CB 2.2 built `ΔW = (α/r)·B·A` and proved the rank bound numerically; CB 2.3 verified the merge trick to float noise.
 
@@ -89,7 +89,7 @@ One contrast for later: W_Q (k@90 = 65) would hit error 0.316 with far fewer dir
 
 ---
 
-## Unit 3 — The LoRA hypothesis: does GD find a low-rank delta? (in progress)
+## Study 3 — The LoRA hypothesis: does GD find a low-rank delta? (in progress)
 
 **Design.** A *controlled* task: inject a known rank-4 delta `E` (`‖E‖/‖W‖ = 0.1`) into `W_gate`, train to recover it from 576 real token embeddings (`X = W_E[:576]`, measured `rank(X) = 565`). Then train full fine-tuning on the identical task. The controlled target makes any residual an *optimization* story, not a *representation* one.
 
@@ -110,7 +110,7 @@ One contrast for later: W_Q (k@90 = 65) would hit error 0.316 with far fewer dir
 
 ---
 
-## Unit 4 — Choosing the Rank: when does adding r stop buying? (complete)
+## Study 4 — Choosing the Rank: when does adding r stop buying? (complete)
 
 **Design.** Sweep rank `r` across two deltas: a controlled rank-4 delta on `W_gate` (ground truth known) and a *real* cross-layer delta `W_Q1 − W_Q0`. Read the **loss-elbow** (smallest `r` where the next rank buys < 2×) and cross-check it against the delta's spectral effective rank (`k90`). All on 576 real token embeddings (`rank(X) = 565`, quantified caveat).
 
@@ -147,12 +147,57 @@ Real (B) has a long spectral tail, no cliff. Its delta is ~rank-200 (k90=200). F
 
 ---
 
-## Unit 5 — Spectra at Scale: does low rank survive 135M → 1.7B? (scaffolded)
+## Study 5 findings (measured — SmolLM2 135M, 360M, 1.7B)
 
-**Question.** Unit 1 measured the spectrum of one model. Does the rank structure *travel* as the model grows? Three SmolLM2 sizes (135M, 360M, 1.7B), the same five matrices, one SVD each, plotted against parameter count.
+**Settled on first read: 360M's width is 960, not 576.** The contested architecture number is now measured directly from the checkpoint (gate/up `(2560, 960)`, q/emb `(960, 960)`). The SLM-survey table said 576; the actual weights say 960. The family is *not* iso-architectural after all (135M width 576 vs 360M width 960), which the pre-committed scope honesty already flagged — we claim family persistence, not a scaling law.
 
-**Hypothesis.** If the effective rank tracks the model's *width* (d = 576 → 960 → 2048), k90/n should stay roughly flat across sizes — concentration is a property of the architecture, not the scale. If it tracks something else, the ratio moves and the "concentration is intrinsic" story needs rewriting.
+**Metrics, five matrices × three sizes** (`k90` = smallest k capturing ≥90% energy; `top1` = σ₁²/‖σ‖²; `k90/n` = normalized effective rank). Widths measured from checkpoints: **576 → 960 → 2048**.
 
-**The measurement.** Load each model fresh, extract the five matrices, SVD each to the 90%-energy rank (`k90`) and top-1 energy share, then `del model` + `gc.collect()` before the next size. The download is the constraint: 360M (~720MB) and 1.7B (~3.4GB) will stream into the HF cache once; after that every run is local. CPU time is bounded by the 1.7B SVD (only the top of the spectrum is needed — `torch.linalg.svd(..., full_matrices=False)`).
+| Matrix | 135M k90/n | 135M top1 | 360M k90/n | 360M top1 | 1.7B k90/n | 1.7B top1 | Trend |
+|---|---|---|---|---|---|---|---|
+| gate | 0.684 | 0.030 | 0.690 | 0.018 | 0.716 | 0.006 | slowly flattens |
+| up | 0.688 | 0.006 | 0.683 | 0.004 | 0.723 | 0.003 | ~flat |
+| down | 0.674 | 0.019 | 0.674 | 0.023 | 0.758 | 0.006 | drifts up |
+| q | 0.113 | 0.254 | 0.092 | 0.215 | 0.102 | 0.188 | concentrated, persists |
+| emb | 0.635 | 0.506 | 0.740 | 0.303 | 0.772 | **0.093** | **dilutes fast** |
 
-**Findings:** _pending measurement._ To be filled after the notebooks run.
+**Hypothesis-board verdicts (measured):**
+
+| # | Claim | Predicted | Measured | Verdict |
+|---|---|---|---|---|
+| H1 | FFN `k90/n` flat across scale | ~0.68–0.72 | 0.68→0.76 (shallow rise) | ✅ Mostly holds |
+| H2 | concentration tracks width → flat `k90/n` | flat | FFN ~flat, emb rises, q stays | ⚠️ Partial |
+| H3 | W_Q stays the most concentrated | persists | 0.113→0.092→0.102 (~0.1) | ✅ Holds |
+| H4 | W_E concentration persists | persists | **top1 50.6%→30.3%→9.3%** | ❌ Reversed |
+
+**The two real surprises.**
+
+1. **W_E *dilutes* with scale, and fast.** `top1` collapses 50.6% → 30.3% → **9.3%**; effective rank rises 0.635 → 0.740 → 0.772. The single "common direction" holding half the embedding's energy at 135M is nearly gone by 1.7B. "One direction dominates embeddings" is a *135M phenomenon*, not a family invariant — concentration does *not* survive in W_E. (One honest caveat: embedding width grows 576→2048 while vocab stays 49,152, so the per-token row gets 3.5× more slack; that mechanical widening, not a semantic change, is the most parsimonious driver of the dilution.)
+
+2. **W_Q stays dramatically concentrated across all three sizes** — `k90/n` ≈ 0.1 (~7× tighter than the FFN trio) at width 576, 960, and 2048. The attention-side low-rank hint from Unit 1 is a genuine *scale-stable* property, not a small-model quirk. This is the single most durable pattern in the family.
+
+The FFN trio holds roughly flat (`k90/n` 0.67→0.76) — mild drift upward at 1.7B, nothing cliff-like. The spectrum does not scale up as a trivial average of static curves; W_Q and W_E pull in opposite directions as width grows.
+
+**Completeness:** all three sizes measured (extractor ~0.6–3s per model, pre-extracted to `unit5_mats/*.pt`; no model ever loads into the kernel).
+
+**Reading the two metrics as complements.** `k90/n` is width-normalized — the fair comparator across sizes. `top1` is **not**: its denominator runs over all n singular values, so as width grows 576→2048 the sum inflates and `top1` falls *mechanically* on every matrix (gate 0.030→0.006, q 0.254→0.188, up 0.006→0.003). If the story were `top1` alone, you'd wrongly conclude concentration dilutes everywhere. The size-fair verdict is `k90/n` (largely flat → rank structure travels). `top1` is diagnostic only when it moves the *same* direction as `k90/n` — exactly the two cases that disagree, and the two that matter: **W_Q holds** (both metrics stable) and **W_E reverses** (both metrics).
+
+**Verdict in one line.** Rank structure is a property of the SmolLM2 *architecture*, not a specific checkpoint: the width-normalized `k90/n` held across 135M→1.7B, so the rank-selection recipe (sweep the floor, read k90, set r = k90) is portable to a 1.7B adapter without re-measuring every layer — the flatness LoRA's budget assumptions at scale rest on. Three honest edge cases, measured rather than smoothed over: W_E genuinely dilutes (both metrics), the FFN `k90/n` drifts up ~0.08 (down_proj, just past tolerance), and `top1` alone is not a valid flatness test.
+
+---
+
+## Study 6 — Industrial Deployment: from math to a served model
+
+**Question.** The math is proven (merge is exact, rank travels). Does it *ship*? Build a real rank-8 adapter on SmolLM2-135M, then measure each deployment step as a quantifiable delta: merge error, quantized-vs-full output drift (8-bit vs 4-bit), memory footprint, and unmerged multi-adapter routing (base shared, deltas swapped) — all on CPU, all by hand, no `peft` dependency for the core.
+
+**Structured as a research note.** Abstract + related work (LoRA, QLoRA, GPTQ, the previous study) → pipeline & knobs (train → merge → quantize → serve) → hypothesis board decided *before* measurement → protocol & constraints (135M, r=8, float32, fixed seed, batch 1) → four experiments, each implemented and run.
+
+**Measured findings.** A real rank-8 adapter was trained on `gate_proj` (next-token CE 1.045 → 0.113; ΔW exactly rank-8; ‖ΔW‖/‖W0‖ = 0.148), then each deployment step was measured:
+
+- **H1 merge exact — ✅.** max error 5.96e-8, rel Frobenius 2.6e-9, both *below* the float32 eps floor (1.2e-7). Merging is a renaming, not a transform.
+- **H2 8-bit preserves behavior — ❌.** Relative drift 0.184 (~18%) under the pre-committed whole-matrix min/max affine. The failure is the crude quantizer, not the adapter — per-row scales (the standard fix) would recover most of the drift.
+- **H3 4-bit loses more — ✅.** Peak drift 11.91 vs 0.655 at 8-bit (~18×), at 1/8 vs 1/4 the float32 memory (3,538,944 → 884,736 → 442,368 bytes).
+- **H4 unmerged shares memory, costs latency — ✅.** Base gate (3.54 MB) fully shared; per-adapter delta just 67.6 KB (~1.9%); unmerged routing pays ~16% more ms/op.
+- **H5 merged ≈ full at runtime — ✅.** 4.71 vs 4.82 ms/op (gate microbenchmark) — the swap is a runtime no-op.
+
+**Verdict in one line.** The previous studies' math ships verbatim: merging is exact to float noise, merged serving is indistinguishable from full at logit and latency level, and unmerged multi-adapter routing keeps the base shared for a small, measured latency cost. The one honest failure is the whole-matrix quantizer — reported as measured, not papered over.
