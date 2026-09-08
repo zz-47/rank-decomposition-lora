@@ -9,7 +9,7 @@ The full math of LoRA, measured on real SLM weights — SVD to rank selection to
 |------|-------|-------------|--------|
 | 1 | SVD & Eckart–Young on real weights | `W ≈ Uₖ·Sₖ·Vₖᵀ`, error ∝ tail energy | ✅ Complete |
 | 2 | The LoRA parametrization | `ΔW = (α/r)·B·A`, budget, merge trick | ✅ Complete |
-| 3 | The LoRA hypothesis (real GD) | learned `ΔW` after gradient descent on one layer | 🚧 CB 3.2 re-run pending |
+| 3 | The LoRA hypothesis (real GD) | learned `ΔW` after gradient descent on one layer |  ✅ Complete |
 | 4 | Rank selection | how to pick `r` with data | ✅ Complete (Exp A–C) |
 | 5 | Scale-out: spectra 135M→1.7B | rank behavior across model size | pending |
 | 6 | Industrial deployment | merging, QLoRA, multi-adapter, CPU serving | pending |
