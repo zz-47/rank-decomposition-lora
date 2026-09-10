@@ -207,4 +207,5 @@ The FFN trio holds roughly flat (`k90/n` 0.67→0.76) — mild drift upward at 1
 - **H5 merged ≈ full at runtime — ✅.** 4.71 vs 4.82 ms/op (gate microbenchmark) — the swap is a runtime no-op.
 
 **Verdict in one line.** The previous studies' math ships verbatim: merging is exact to float noise, merged serving is indistinguishable from full at logit and latency level, and unmerged multi-adapter routing keeps the base shared for a small, measured latency cost. The one honest failure is the whole-matrix quantizer — reported as measured, not papered over.
+ 
 
